@@ -137,29 +137,28 @@ def make_jwt_deps(get_conn):
         le row local enrichi (organization_id, platform_role, modules)."""
         jwt_token = _extract_bearer(authorization, token)
         payload = _decode_token(jwt_token)
-        # GATING SOUPLE — pas de _check_module ici (cf. docstring module).
+        # Workspace Switcher (035) : active_organization_id prime sur le legacy.
+        org_id = payload.get("active_organization_id") or payload.get("organization_id")
+        # Garde-fou allowlist d'orgs — AVANT le provisioning (aucune row ad_vis.users
+        # créée pour une org non autorisée). S'applique à TOUS les endpoints (/auth/me
+        # inclus). GATING SOUPLE module conservé (pas de _check_module).
+        allow = _org_allowlist()
+        if allow is not None and str(org_id or "").lower() not in allow:
+            raise HTTPException(
+                status_code=403,
+                detail="Ad VIS n'est pas activé pour votre organisation",
+            )
         conn = get_conn()
         try:
             user = _provision_user(conn, payload)
         finally:
             conn.close()
         user["modules"] = payload.get("modules") or []
-        # Workspace Switcher (035) : active_organization_id prime sur le legacy.
-        user["organization_id"] = (
-            payload.get("active_organization_id") or payload.get("organization_id")
-        )
+        user["organization_id"] = org_id
         user["platform_role"] = (
             payload.get("platform_role") or _derive_platform_role(payload.get("role"))
         )
         user["org_role"] = payload.get("active_role") or payload.get("org_role")
-        # Garde-fou allowlist d'orgs — 403 si l'org n'est pas autorisée (s'applique
-        # à TOUS les endpoints via cette dépendance, /auth/me inclus).
-        allow = _org_allowlist()
-        if allow is not None and str(user["organization_id"]).lower() not in allow:
-            raise HTTPException(
-                status_code=403,
-                detail="Ad VIS n'est pas activé pour votre organisation",
-            )
         # Token brut conservé pour les appels cross-service (proxy HUB).
         user["_jwt"] = jwt_token
         return user
