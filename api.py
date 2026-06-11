@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from modules.auth_jwt import make_jwt_deps
 from modules.vis_api import register_vis_routes
 from modules.capture_api import register_capture_routes
+from modules.photos_api import register_photos_routes
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
@@ -112,6 +113,7 @@ jwt_user, jwt_super_admin = make_jwt_deps(get_conn)
 
 app.include_router(register_vis_routes(get_conn, jwt_user))
 app.include_router(register_capture_routes(get_conn, jwt_user))
+app.include_router(register_photos_routes(get_conn, jwt_user))
 
 
 @app.get("/")
