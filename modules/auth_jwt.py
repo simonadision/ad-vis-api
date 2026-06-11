@@ -105,6 +105,26 @@ def _provision_user(conn, payload: dict) -> dict:
     return user
 
 
+# ── Garde-fou : allowlist d'organisations (effectif, réversible) ─────────
+# Le gating de MODULE reste souple (pas de check du claim 'ad_vis'), MAIS tant
+# que le resserrement Sprint 1 n'est pas câblé côté HUB, Ad VIS n'est ouvert
+# qu'aux orgs de cette liste — toute autre org reçoit 403 sur TOUS les endpoints
+# (la tuile seule serait cosmétique : l'URL directe resterait atteignable).
+# Override : env AD_VIS_ORG_ALLOWLIST (UUIDs séparés par virgules) ; '*' (ou vide)
+# DÉSACTIVE le garde-fou (à poser au Sprint 1 quand on ouvre plus large).
+_DEFAULT_ALLOWLIST = (
+    "870c8388-4b9c-4ab6-b8e6-bbc8410638c3,"  # Adision
+    "64c45c53-ff2b-40ce-b05d-fe0a3f5144c0"   # Contracta
+)
+
+
+def _org_allowlist():
+    raw = os.environ.get("AD_VIS_ORG_ALLOWLIST", _DEFAULT_ALLOWLIST).strip()
+    if raw in ("*", ""):
+        return None  # None = aucune restriction (ouvert à toutes les orgs)
+    return {x.strip().lower() for x in raw.split(",") if x.strip()}
+
+
 def make_jwt_deps(get_conn):
     """Crée les FastAPI dependencies bound au get_conn de l'app."""
 
@@ -132,6 +152,14 @@ def make_jwt_deps(get_conn):
             payload.get("platform_role") or _derive_platform_role(payload.get("role"))
         )
         user["org_role"] = payload.get("active_role") or payload.get("org_role")
+        # Garde-fou allowlist d'orgs — 403 si l'org n'est pas autorisée (s'applique
+        # à TOUS les endpoints via cette dépendance, /auth/me inclus).
+        allow = _org_allowlist()
+        if allow is not None and str(user["organization_id"]).lower() not in allow:
+            raise HTTPException(
+                status_code=403,
+                detail="Ad VIS n'est pas activé pour votre organisation",
+            )
         # Token brut conservé pour les appels cross-service (proxy HUB).
         user["_jwt"] = jwt_token
         return user
