@@ -28,8 +28,9 @@ def register_checklist_routes(get_conn, jwt_user):
 
     @router.get("/api/visites/{visite_id}/checklist")
     def get_checklist(visite_id: int, user=Depends(jwt_user)):
-        """Items par défaut du profil de la visite (system org NULL + items de
-        l'org), fusionnés avec l'état coché/note de CETTE visite."""
+        """Checklist COMMUNE (fusion estimateur+contremaitre, migration 006) :
+        items actifs system (org NULL) + items de l'org, SANS filtre par profil
+        — la même liste pour toute visite — fusionnés avec l'état coché/note."""
         org = user["organization_id"]
         conn = get_conn()
         try:
@@ -46,11 +47,11 @@ def register_checklist_routes(get_conn, jwt_user):
                     FROM ad_vis.checklist_items ci
                     LEFT JOIN ad_vis.checklist_reponses cr
                       ON cr.checklist_item_id = ci.id AND cr.visite_id = %s
-                    WHERE ci.active = TRUE AND ci.profil = %s
+                    WHERE ci.active = TRUE
                       AND (ci.organization_id IS NULL OR ci.organization_id = %s)
                     ORDER BY ci.is_system DESC, ci.ordre ASC, ci.id ASC
                     """,
-                    (visite_id, vis["profil"], org),
+                    (visite_id, org),
                 )
                 rows = cur.fetchall()
             finally:
@@ -83,17 +84,19 @@ def register_checklist_routes(get_conn, jwt_user):
                 vis = _visite_scoped(cur, visite_id, org)
                 if not vis:
                     raise HTTPException(status_code=404, detail="Visite introuvable")
-                # L'item doit appartenir au profil de la visite (system ou org).
+                # Garde : item ACTIF + visible pour l'org (system ou org). PLUS de
+                # filtre par profil (checklist commune) ; org-scoping conservé via
+                # la visite (_visite_scoped) → isolation cross-org intacte (404).
                 cur.execute(
                     """
                     SELECT id FROM ad_vis.checklist_items
-                    WHERE id = %s AND active = TRUE AND profil = %s
+                    WHERE id = %s AND active = TRUE
                       AND (organization_id IS NULL OR organization_id = %s)
                     """,
-                    (item_id, vis["profil"], org),
+                    (item_id, org),
                 )
                 if cur.fetchone() is None:
-                    raise HTTPException(status_code=404, detail="Item de checklist invalide pour ce profil")
+                    raise HTTPException(status_code=404, detail="Item de checklist invalide")
                 # État courant pour un patch partiel.
                 cur.execute(
                     "SELECT coche, commentaire FROM ad_vis.checklist_reponses "

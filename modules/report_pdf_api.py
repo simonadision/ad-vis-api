@@ -101,8 +101,8 @@ def _build_pdf(vis, projet_nom, notes, obs, photos, checklist):
 
     el = [Paragraph("Rapport de visite de chantier", H1), Paragraph(escape(projet_nom), SUB), Spacer(1, 10)]
 
-    info = [("Profil", PROFIL_LABELS.get(vis["profil"], vis["profil"])),
-            ("Date de visite", str(vis["date_visite"])),
+    # profil NEUTRALISÉ (checklist commune) -> ligne « Profil » RETIRÉE de l'en-tête.
+    info = [("Date de visite", str(vis["date_visite"])),
             ("Statut", STATUT_LABELS.get(vis["statut"], vis["statut"]))]
     # Responsable (nom + poste) — ligne OMISE proprement si les deux sont vides.
     resp_nom = (vis.get("nom_responsable") or "").strip()
@@ -208,9 +208,9 @@ def _fetch_report_data(cur, visite_id, org):
         """SELECT ci.label, COALESCE(cr.coche, FALSE) AS coche, COALESCE(cr.commentaire, '') AS commentaire
            FROM ad_vis.checklist_items ci
            LEFT JOIN ad_vis.checklist_reponses cr ON cr.checklist_item_id = ci.id AND cr.visite_id = %s
-           WHERE ci.active = TRUE AND ci.profil = %s AND (ci.organization_id IS NULL OR ci.organization_id = %s)
+           WHERE ci.active = TRUE AND (ci.organization_id IS NULL OR ci.organization_id = %s)
            ORDER BY ci.is_system DESC, ci.ordre, ci.id""",
-        (visite_id, vis["profil"], org),
+        (visite_id, org),
     )
     checklist = cur.fetchall()
     return vis, notes, obs, photos, checklist

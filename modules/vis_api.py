@@ -98,7 +98,9 @@ def register_vis_routes(get_conn, jwt_user):
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="central_project_id invalide")
 
-        profil = data.get("profil")
+        # profil NEUTRALISÉ (checklist commune) : défaut serveur si la modale ne
+        # l'envoie plus. Reste NOT NULL en base ; ne filtre plus la checklist.
+        profil = data.get("profil") or "estimateur"
         if profil not in PROFILS:
             raise HTTPException(status_code=400, detail=f"profil invalide (valeurs : {', '.join(PROFILS)})")
 
