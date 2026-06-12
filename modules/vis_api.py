@@ -32,6 +32,8 @@ def _serialize_visite(r: dict) -> dict:
         "date_visite": r["date_visite"].isoformat() if r.get("date_visite") else None,
         "statut": r["statut"],
         "meteo": r.get("meteo"),
+        "nom_responsable": r.get("nom_responsable"),
+        "poste_responsable": r.get("poste_responsable"),
         "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
     }
 
@@ -84,6 +86,8 @@ def register_vis_routes(get_conn, jwt_user):
             except ValueError:
                 raise HTTPException(status_code=400, detail="date_visite invalide (attendu YYYY-MM-DD)")
         meteo = (data.get("meteo") or None)
+        nom_resp = (data.get("nom_responsable") or "").strip() or None
+        poste_resp = (data.get("poste_responsable") or "").strip() or None
 
         conn = get_conn()
         try:
@@ -93,13 +97,13 @@ def register_vis_routes(get_conn, jwt_user):
                     """
                     INSERT INTO ad_vis.visites
                       (central_project_id, organization_id, profil, auteur_user_id,
-                       date_visite, statut, meteo)
-                    VALUES (%s, %s, %s, %s, COALESCE(%s::date, CURRENT_DATE), 'brouillon', %s)
+                       date_visite, statut, meteo, nom_responsable, poste_responsable)
+                    VALUES (%s, %s, %s, %s, COALESCE(%s::date, CURRENT_DATE), 'brouillon', %s, %s, %s)
                     RETURNING id, central_project_id, organization_id, profil, auteur_user_id,
-                              date_visite, statut, meteo, created_at
+                              date_visite, statut, meteo, nom_responsable, poste_responsable, created_at
                     """,
                     (central_project_id, user["organization_id"], profil, user["id"],
-                     date_visite, meteo),
+                     date_visite, meteo, nom_resp, poste_resp),
                 )
                 row = cur.fetchone()
                 conn.commit()
@@ -123,7 +127,7 @@ def register_vis_routes(get_conn, jwt_user):
                     """
                     SELECT v.id, v.central_project_id, v.organization_id, v.profil,
                            v.auteur_user_id, u.nom AS auteur_nom, v.date_visite,
-                           v.statut, v.meteo, v.created_at
+                           v.statut, v.meteo, v.nom_responsable, v.poste_responsable, v.created_at
                     FROM ad_vis.visites v
                     LEFT JOIN ad_vis.users u ON u.id = v.auteur_user_id
                     WHERE v.organization_id = %s AND v.central_project_id = %s
@@ -162,8 +166,12 @@ def register_vis_routes(get_conn, jwt_user):
             except ValueError:
                 raise HTTPException(status_code=400, detail="date_visite invalide (YYYY-MM-DD)")
             sets.append("date_visite = %s"); params.append(data["date_visite"])
+        if "nom_responsable" in data:
+            sets.append("nom_responsable = %s"); params.append((data.get("nom_responsable") or "").strip() or None)
+        if "poste_responsable" in data:
+            sets.append("poste_responsable = %s"); params.append((data.get("poste_responsable") or "").strip() or None)
         if not sets:
-            raise HTTPException(status_code=400, detail="Aucun champ modifiable (statut/meteo/date_visite)")
+            raise HTTPException(status_code=400, detail="Aucun champ modifiable (statut/meteo/date_visite/nom_responsable/poste_responsable)")
 
         conn = get_conn()
         try:
@@ -174,7 +182,7 @@ def register_vis_routes(get_conn, jwt_user):
                     UPDATE ad_vis.visites SET {', '.join(sets)}
                     WHERE id = %s AND organization_id = %s
                     RETURNING id, central_project_id, organization_id, profil, auteur_user_id,
-                              date_visite, statut, meteo, created_at
+                              date_visite, statut, meteo, nom_responsable, poste_responsable, created_at
                     """,
                     params + [visite_id, user["organization_id"]],
                 )
@@ -200,7 +208,7 @@ def _fetch_visite_scoped(get_conn, visite_id: int, org_id):
                 """
                 SELECT v.id, v.central_project_id, v.organization_id, v.profil,
                        v.auteur_user_id, u.nom AS auteur_nom, v.date_visite,
-                       v.statut, v.meteo, v.created_at
+                       v.statut, v.meteo, v.nom_responsable, v.poste_responsable, v.created_at
                 FROM ad_vis.visites v
                 LEFT JOIN ad_vis.users u ON u.id = v.auteur_user_id
                 WHERE v.id = %s AND v.organization_id = %s

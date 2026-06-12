@@ -104,6 +104,12 @@ def _build_pdf(vis, projet_nom, notes, obs, photos, checklist):
     info = [("Profil", PROFIL_LABELS.get(vis["profil"], vis["profil"])),
             ("Date de visite", str(vis["date_visite"])),
             ("Statut", STATUT_LABELS.get(vis["statut"], vis["statut"]))]
+    # Responsable (nom + poste) — ligne OMISE proprement si les deux sont vides.
+    resp_nom = (vis.get("nom_responsable") or "").strip()
+    resp_poste = (vis.get("poste_responsable") or "").strip()
+    if resp_nom or resp_poste:
+        rv = f"{resp_nom} — {resp_poste}" if (resp_nom and resp_poste) else (resp_nom or resp_poste)
+        info.append(("Responsable", rv))
     if vis.get("auteur_nom"):
         info.append(("Auteur", vis["auteur_nom"]))
     if vis.get("meteo"):
@@ -184,7 +190,7 @@ def _fetch_report_data(cur, visite_id, org):
     Partagé par le rapport.pdf ET le dépôt GED."""
     cur.execute(
         """SELECT v.id, v.central_project_id, v.profil, v.date_visite, v.statut, v.meteo,
-                  u.nom AS auteur_nom
+                  v.nom_responsable, v.poste_responsable, u.nom AS auteur_nom
            FROM ad_vis.visites v LEFT JOIN ad_vis.users u ON u.id = v.auteur_user_id
            WHERE v.id = %s AND v.organization_id = %s""",
         (visite_id, org),
