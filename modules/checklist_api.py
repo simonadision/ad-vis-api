@@ -17,7 +17,7 @@ from psycopg.rows import dict_row
 def _visite_scoped(cur, visite_id, org_id):
     """Retourne (id, profil) de la visite si elle appartient à l'org, sinon None."""
     cur.execute(
-        "SELECT id, profil FROM ad_vis.visites WHERE id = %s AND organization_id = %s",
+        "SELECT id, profil FROM ad_vis.visites WHERE id = %s AND organization_id = %s AND deleted_at IS NULL",
         (visite_id, org_id),
     )
     return cur.fetchone()
@@ -47,6 +47,7 @@ def register_checklist_routes(get_conn, jwt_user):
                     FROM ad_vis.checklist_items ci
                     LEFT JOIN ad_vis.checklist_reponses cr
                       ON cr.checklist_item_id = ci.id AND cr.visite_id = %s
+                         AND cr.deleted_at IS NULL
                     WHERE ci.active = TRUE
                       AND (ci.organization_id IS NULL OR ci.organization_id = %s)
                     ORDER BY ci.is_system DESC, ci.ordre ASC, ci.id ASC

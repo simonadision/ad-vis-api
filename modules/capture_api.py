@@ -40,7 +40,7 @@ def _serialize_obs(r):
 def _assert_visite_org(cur, visite_id, org_id):
     """404 si la visite n'existe pas OU n'appartient pas à l'org du JWT."""
     cur.execute(
-        "SELECT id FROM ad_vis.visites WHERE id = %s AND organization_id = %s",
+        "SELECT id FROM ad_vis.visites WHERE id = %s AND organization_id = %s AND deleted_at IS NULL",
         (visite_id, org_id),
     )
     if cur.fetchone() is None:

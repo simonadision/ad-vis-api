@@ -25,7 +25,7 @@ MAX_BYTES = 15 * 1024 * 1024  # 15 Mo
 
 
 def _assert_visite_org(cur, visite_id, org_id):
-    cur.execute("SELECT id FROM ad_vis.visites WHERE id = %s AND organization_id = %s", (visite_id, org_id))
+    cur.execute("SELECT id FROM ad_vis.visites WHERE id = %s AND organization_id = %s AND deleted_at IS NULL", (visite_id, org_id))
     if cur.fetchone() is None:
         raise HTTPException(status_code=404, detail="Visite introuvable")
 

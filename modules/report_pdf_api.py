@@ -192,7 +192,7 @@ def _fetch_report_data(cur, visite_id, org):
         """SELECT v.id, v.central_project_id, v.profil, v.date_visite, v.statut, v.meteo,
                   v.nom_responsable, v.poste_responsable, u.nom AS auteur_nom
            FROM ad_vis.visites v LEFT JOIN ad_vis.users u ON u.id = v.auteur_user_id
-           WHERE v.id = %s AND v.organization_id = %s""",
+           WHERE v.id = %s AND v.organization_id = %s AND v.deleted_at IS NULL""",
         (visite_id, org),
     )
     vis = cur.fetchone()

@@ -156,6 +156,7 @@ def register_vis_routes(get_conn, jwt_user):
                     FROM ad_vis.visites v
                     LEFT JOIN ad_vis.users u ON u.id = v.auteur_user_id
                     WHERE v.organization_id = %s AND v.central_project_id = %s
+                      AND v.deleted_at IS NULL
                     ORDER BY v.date_visite DESC, v.id DESC
                     """,
                     (user["organization_id"], project_id),
@@ -221,6 +222,47 @@ def register_vis_routes(get_conn, jwt_user):
             raise HTTPException(status_code=404, detail="Visite introuvable")
         return {"visite": _serialize_visite(row)}
 
+    # ── DELETE visite = SOFT-delete réversible + cascade soft-delete contenus ─
+    @router.delete("/api/visites/{visite_id}")
+    def delete_visite(visite_id: int, user=Depends(jwt_user)):
+        """Soft-delete (deleted_at) — JAMAIS de hard-delete. Org-scopé via la
+        visite (404 cross-org). Cascade soft-delete des contenus liés (notes,
+        observations, photos, réponses checklist) DANS LA MÊME TRANSACTION : NOW()
+        y est constant → même deleted_at pour la visite et ses contenus (permet une
+        restauration précise par super_admin). NE TOUCHE PAS les objets R2 des
+        photos (conservés) ni le HUB/GED (enregistrement officiel indépendant)."""
+        org = user["organization_id"]
+        conn = get_conn()
+        try:
+            cur = conn.cursor(row_factory=dict_row)
+            try:
+                # 1) la visite (idempotent : seulement si pas déjà supprimée)
+                cur.execute(
+                    """
+                    UPDATE ad_vis.visites SET deleted_at = NOW()
+                    WHERE id = %s AND organization_id = %s AND deleted_at IS NULL
+                    RETURNING id
+                    """,
+                    (visite_id, org),
+                )
+                if cur.fetchone() is None:
+                    raise HTTPException(status_code=404, detail="Visite introuvable")
+                # 2) cascade sur les contenus (R2 et HUB/GED NON touchés)
+                cascade = {}
+                for table in ("notes", "observations", "photos", "checklist_reponses"):
+                    cur.execute(
+                        f"UPDATE ad_vis.{table} SET deleted_at = NOW() "
+                        f"WHERE visite_id = %s AND deleted_at IS NULL",
+                        (visite_id,),
+                    )
+                    cascade[table] = cur.rowcount
+                conn.commit()
+            finally:
+                cur.close()
+        finally:
+            conn.close()
+        return {"deleted": True, "id": visite_id, "cascade": cascade}
+
     return router
 
 
@@ -236,7 +278,7 @@ def _fetch_visite_scoped(get_conn, visite_id: int, org_id):
                        v.statut, v.meteo, v.nom_responsable, v.poste_responsable, v.created_at
                 FROM ad_vis.visites v
                 LEFT JOIN ad_vis.users u ON u.id = v.auteur_user_id
-                WHERE v.id = %s AND v.organization_id = %s
+                WHERE v.id = %s AND v.organization_id = %s AND v.deleted_at IS NULL
                 """,
                 (visite_id, org_id),
             )
