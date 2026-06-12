@@ -202,7 +202,16 @@ def _fetch_report_data(cur, visite_id, org):
     notes = cur.fetchall()
     cur.execute("SELECT type, texte FROM ad_vis.observations WHERE visite_id = %s AND deleted_at IS NULL ORDER BY ordre, id", (visite_id,))
     obs = cur.fetchall()
-    cur.execute("SELECT url_r2, legende, lat, lng, prise_le FROM ad_vis.photos WHERE visite_id = %s AND deleted_at IS NULL ORDER BY ordre, id", (visite_id,))
+    # Feuilles seulement : la version annotée (si elle existe) remplace l'originale.
+    cur.execute(
+        """SELECT p.url_r2, p.legende, p.lat, p.lng, p.prise_le
+           FROM ad_vis.photos p
+           WHERE p.visite_id = %s AND p.deleted_at IS NULL
+             AND NOT EXISTS (SELECT 1 FROM ad_vis.photos c
+                             WHERE c.annotated_from_photo_id = p.id AND c.deleted_at IS NULL)
+           ORDER BY p.ordre, p.id""",
+        (visite_id,),
+    )
     photos = cur.fetchall()
     cur.execute(
         """SELECT ci.label, COALESCE(cr.coche, FALSE) AS coche, COALESCE(cr.commentaire, '') AS commentaire
