@@ -11,12 +11,17 @@ Org-scopé via la visite parente (404 cross-org) + allowlist héritée de jwt_us
 AUCUNE écriture DB. Images = bytes R2 côté SERVEUR (pas d'URL signée publique).
 Dépôt GED HUB = HORS scope (sujet dédié).
 """
+import datetime
+import hashlib
 import io
 from xml.sax.saxutils import escape
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from psycopg.rows import dict_row
+
+VISITE_CHANTIER_CAT = "Visite de chantier"
+PHASE = "pre_construction"
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
@@ -174,56 +179,71 @@ def _build_pdf(vis, projet_nom, notes, obs, photos, checklist):
     return buf.getvalue()
 
 
+def _fetch_report_data(cur, visite_id, org):
+    """Charge toutes les données d'UNE visite (org-scopée). None si introuvable.
+    Partagé par le rapport.pdf ET le dépôt GED."""
+    cur.execute(
+        """SELECT v.id, v.central_project_id, v.profil, v.date_visite, v.statut, v.meteo,
+                  u.nom AS auteur_nom
+           FROM ad_vis.visites v LEFT JOIN ad_vis.users u ON u.id = v.auteur_user_id
+           WHERE v.id = %s AND v.organization_id = %s""",
+        (visite_id, org),
+    )
+    vis = cur.fetchone()
+    if not vis:
+        return None
+    cur.execute("SELECT texte FROM ad_vis.notes WHERE visite_id = %s AND deleted_at IS NULL ORDER BY ordre, id", (visite_id,))
+    notes = cur.fetchall()
+    cur.execute("SELECT type, texte FROM ad_vis.observations WHERE visite_id = %s AND deleted_at IS NULL ORDER BY ordre, id", (visite_id,))
+    obs = cur.fetchall()
+    cur.execute("SELECT url_r2, legende, lat, lng, prise_le FROM ad_vis.photos WHERE visite_id = %s AND deleted_at IS NULL ORDER BY ordre, id", (visite_id,))
+    photos = cur.fetchall()
+    cur.execute(
+        """SELECT ci.label, COALESCE(cr.coche, FALSE) AS coche, COALESCE(cr.commentaire, '') AS commentaire
+           FROM ad_vis.checklist_items ci
+           LEFT JOIN ad_vis.checklist_reponses cr ON cr.checklist_item_id = ci.id AND cr.visite_id = %s
+           WHERE ci.active = TRUE AND ci.profil = %s AND (ci.organization_id IS NULL OR ci.organization_id = %s)
+           ORDER BY ci.is_system DESC, ci.ordre, ci.id""",
+        (visite_id, vis["profil"], org),
+    )
+    checklist = cur.fetchall()
+    return vis, notes, obs, photos, checklist
+
+
+def _resolve_project(jwt_token, central_project_id):
+    """Projet HUB correspondant au central_project_id (dans l'org du JWT), ou None."""
+    try:
+        for p in hub_service.list_org_projects(jwt_token):
+            if str(p.get("id")) == str(central_project_id):
+                return p
+    except Exception:
+        return None
+    return None
+
+
 def register_report_routes(get_conn, jwt_user):
     router = APIRouter()
 
-    @router.get("/api/visites/{visite_id}/rapport.pdf")
-    def rapport_pdf(visite_id: int, user=Depends(jwt_user)):
-        org = user["organization_id"]
+    def _load(visite_id, org):
         conn = get_conn()
         try:
             cur = conn.cursor(row_factory=dict_row)
             try:
-                cur.execute(
-                    """SELECT v.id, v.central_project_id, v.profil, v.date_visite, v.statut, v.meteo,
-                              u.nom AS auteur_nom
-                       FROM ad_vis.visites v LEFT JOIN ad_vis.users u ON u.id = v.auteur_user_id
-                       WHERE v.id = %s AND v.organization_id = %s""",
-                    (visite_id, org),
-                )
-                vis = cur.fetchone()
-                if not vis:
-                    raise HTTPException(status_code=404, detail="Visite introuvable")
-                cur.execute("SELECT texte FROM ad_vis.notes WHERE visite_id = %s AND deleted_at IS NULL ORDER BY ordre, id", (visite_id,))
-                notes = cur.fetchall()
-                cur.execute("SELECT type, texte FROM ad_vis.observations WHERE visite_id = %s AND deleted_at IS NULL ORDER BY ordre, id", (visite_id,))
-                obs = cur.fetchall()
-                cur.execute("SELECT url_r2, legende, lat, lng, prise_le FROM ad_vis.photos WHERE visite_id = %s AND deleted_at IS NULL ORDER BY ordre, id", (visite_id,))
-                photos = cur.fetchall()
-                cur.execute(
-                    """SELECT ci.label, COALESCE(cr.coche, FALSE) AS coche, COALESCE(cr.commentaire, '') AS commentaire
-                       FROM ad_vis.checklist_items ci
-                       LEFT JOIN ad_vis.checklist_reponses cr ON cr.checklist_item_id = ci.id AND cr.visite_id = %s
-                       WHERE ci.active = TRUE AND ci.profil = %s AND (ci.organization_id IS NULL OR ci.organization_id = %s)
-                       ORDER BY ci.is_system DESC, ci.ordre, ci.id""",
-                    (visite_id, vis["profil"], org),
-                )
-                checklist = cur.fetchall()
+                return _fetch_report_data(cur, visite_id, org)
             finally:
                 cur.close()
         finally:
             conn.close()
 
-        # Nom du projet : best-effort via le proxy HUB (sinon « Projet #<id> »).
-        projet_nom = f"Projet #{vis['central_project_id']}"
-        try:
-            for p in hub_service.list_org_projects(user["_jwt"]):
-                if str(p.get("id")) == str(vis["central_project_id"]):
-                    projet_nom = p.get("name") or projet_nom
-                    break
-        except Exception:
-            pass
-
+    @router.get("/api/visites/{visite_id}/rapport.pdf")
+    def rapport_pdf(visite_id: int, user=Depends(jwt_user)):
+        data = _load(visite_id, user["organization_id"])
+        if data is None:
+            raise HTTPException(status_code=404, detail="Visite introuvable")
+        vis, notes, obs, photos, checklist = data
+        # Nom du projet : best-effort (le rapport téléchargeable tolère le fallback).
+        proj = _resolve_project(user["_jwt"], vis["central_project_id"])
+        projet_nom = (proj or {}).get("name") or f"Projet #{vis['central_project_id']}"
         pdf = _build_pdf(vis, projet_nom, notes, obs, photos, checklist)
         filename = f"visite-{visite_id}-{vis['date_visite']}.pdf"
         return StreamingResponse(
@@ -232,4 +252,109 @@ def register_report_routes(get_conn, jwt_user):
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    # ── Infos pré-dépôt (le front décide bouton/avertissement) ───────────────
+    @router.get("/api/visites/{visite_id}/rapport/ged-info")
+    def ged_info(visite_id: int, user=Depends(jwt_user)):
+        data = _load(visite_id, user["organization_id"])
+        if data is None:
+            raise HTTPException(status_code=404, detail="Visite introuvable")
+        vis = data[0]
+        proj = _resolve_project(user["_jwt"], vis["central_project_id"])
+        existing = 0
+        if proj is not None:
+            try:
+                existing = hub_service.count_category_docs(user["_jwt"], vis["central_project_id"], VISITE_CHANTIER_CAT, PHASE)
+            except Exception:
+                existing = 0
+        return {
+            "finalise": vis["statut"] == "finalise",
+            "project_resolved": proj is not None,
+            "projet_nom": (proj or {}).get("name"),
+            "existing_count": existing,
+            "next_version": f"V{existing + 1}",
+        }
+
+    # ── Dépôt du rapport dans la GED HUB « Visite de chantier » ──────────────
+    @router.post("/api/visites/{visite_id}/rapport/deposer-ged")
+    def deposer_ged(visite_id: int, user=Depends(jwt_user)):
+        org = user["organization_id"]
+        jwt = user["_jwt"]
+        data = _load(visite_id, org)
+        if data is None:
+            raise HTTPException(status_code=404, detail="Visite introuvable")
+        vis, notes, obs, photos, checklist = data
+
+        # GARDE 1 : visite finalisée uniquement.
+        if vis["statut"] != "finalise":
+            raise HTTPException(status_code=400, detail="Le dépôt en GED n'est possible que sur une visite finalisée.")
+
+        # GARDE 2 : projet résolu (nom figé + existence/org confirmées). Jamais « Projet #id ».
+        proj = _resolve_project(jwt, vis["central_project_id"])
+        if proj is None:
+            raise HTTPException(status_code=422, detail="Projet lié introuvable dans Ad HUB — dépôt impossible.")
+        projet_nom = proj.get("name") or ""
+        if not projet_nom.strip():
+            raise HTTPException(status_code=422, detail="Projet lié sans nom dans Ad HUB — dépôt impossible.")
+
+        # Catégorie GED cible de l'org.
+        cat_id = hub_service.resolve_category_id(jwt, VISITE_CHANTIER_CAT, PHASE)
+        if not cat_id:
+            raise HTTPException(status_code=422, detail="Dossier GED « Visite de chantier » introuvable pour cette organisation.")
+
+        # PDF + intégrité.
+        pdf = _build_pdf(vis, projet_nom, notes, obs, photos, checklist)
+        sha = hashlib.sha256(pdf).hexdigest()
+        size = len(pdf)
+
+        # Versioning : compte les dépôts existants -> V<n+1> ; nom horodaté.
+        existing = hub_service.count_category_docs(jwt, vis["central_project_id"], VISITE_CHANTIER_CAT, PHASE)
+        version_label = f"V{existing + 1}"
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %Hh%M")
+        filename = f"Rapport de visite {stamp} ({version_label}).pdf"
+
+        # init -> PUT bytes -> confirm (JWT user forwardé). Cleanup-on-failure.
+        try:
+            init = hub_service.init_project_document(jwt, vis["central_project_id"], {
+                "filename": filename, "mime_type": "application/pdf", "size_bytes": size,
+                "category_id": cat_id, "version_label": version_label,
+                "description": f"Rapport de visite de chantier Ad VIS (visite #{visite_id})",
+                "document_date": str(vis["date_visite"]),
+            })
+        except hub_service.HubServiceError as e:
+            if e.status_code == 403:
+                raise HTTPException(status_code=403, detail="Le dépôt en GED requiert un rôle gestionnaire ou responsable du projet.")
+            raise HTTPException(status_code=502, detail=f"Ad HUB (init dépôt) : {e.detail}")
+
+        doc_id = init.get("document_id")
+        upload_url = init.get("upload_url")
+        r2_key = init.get("r2_key")
+
+        try:
+            hub_service.put_presigned(upload_url, pdf, "application/pdf")
+        except Exception as e:
+            _cleanup(jwt, doc_id)
+            raise HTTPException(status_code=502, detail="Échec de l'envoi du fichier (dépôt annulé, aucun document conservé).") from e
+
+        try:
+            hub_service.confirm_document(jwt, doc_id, sha)
+        except Exception as e:
+            _cleanup(jwt, doc_id)
+            raise HTTPException(status_code=502, detail="Échec de la finalisation du dépôt (annulé, aucun document conservé).") from e
+
+        return {
+            "deposited": True, "document_id": doc_id, "r2_key": r2_key,
+            "category": VISITE_CHANTIER_CAT, "version_label": version_label,
+            "display_name": filename, "projet_nom": projet_nom,
+        }
+
     return router
+
+
+def _cleanup(jwt, doc_id):
+    """Best-effort : soft-delete le doc 'uploading' resté après un échec PUT/confirm."""
+    if not doc_id:
+        return
+    try:
+        hub_service.delete_document(jwt, doc_id)
+    except Exception:
+        pass
