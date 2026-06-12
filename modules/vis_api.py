@@ -64,6 +64,29 @@ def register_vis_routes(get_conn, jwt_user):
             ]
         }
 
+    # ── Proxy : employés + postes de l'org (modale création, Brique B) ─────
+    @router.get("/v2/org-users")
+    def org_users(user=Depends(jwt_user)):
+        """Users de l'org (proxy HUB). Org-scopé par le JWT (le HUB filtre)."""
+        try:
+            users = hub_service.list_org_users(user["_jwt"])
+        except hub_service.HubServiceError as e:
+            raise HTTPException(status_code=e.status_code or 502, detail=f"Ad HUB : {e.detail}")
+        return {"users": [
+            {"id": u.get("id"), "nom": u.get("nom"), "email": u.get("email"),
+             "fonction_nom": u.get("fonction_nom"), "status": u.get("status")}
+            for u in users
+        ]}
+
+    @router.get("/v2/org-fonctions")
+    def org_fonctions(user=Depends(jwt_user)):
+        """Référentiel de postes/fonctions de l'org (proxy HUB) — suggestions."""
+        try:
+            fonctions = hub_service.list_fonctions(user["_jwt"])
+        except hub_service.HubServiceError as e:
+            raise HTTPException(status_code=e.status_code or 502, detail=f"Ad HUB : {e.detail}")
+        return {"fonctions": [{"id": f.get("id"), "nom": f.get("nom")} for f in fonctions]}
+
     # ── POST création d'une visite (brouillon) ─────────────────────────────
     @router.post("/api/visites", status_code=201)
     def create_visite(data: dict = Body(...), user=Depends(jwt_user)):

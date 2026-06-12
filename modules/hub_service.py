@@ -86,6 +86,22 @@ def list_org_projects(jwt_token: str, limit: int = 200) -> list:
     return data.get("projects", []) or []
 
 
+# ── Employés + postes de l'org (Brique B — modale création) ─────────────────
+def list_org_users(jwt_token: str) -> list:
+    """Users de l'org (proxy GET HUB /api/organization/users, JWT forwardé →
+    le HUB re-valide l'org → pas de fuite cross-org). Lecture ouverte à tout
+    user de l'org. Renvoie [{id, nom, email, fonction_nom, status, …}]."""
+    data = _hub_get("/api/organization/users", jwt_token)
+    return data.get("users", []) or []
+
+
+def list_fonctions(jwt_token: str) -> list:
+    """Référentiel de fonctions/postes de l'org (proxy GET HUB
+    /api/organization/fonctions). Renvoie [{id, nom, ordre, active}]."""
+    data = _hub_get("/api/organization/fonctions", jwt_token)
+    return data.get("fonctions", []) or []
+
+
 # ── Dépôt d'un document dans la GED HUB (Chantier 3) ─────────────────────────
 def resolve_category_id(jwt_token: str, name: str, phase: str = "pre_construction"):
     """Résout l'id de la catégorie GED par NOM pour l'org (GET HUB
