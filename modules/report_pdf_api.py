@@ -35,8 +35,8 @@ from reportlab.platypus import (
 from modules import hub_service, r2_service
 
 OBS_LABELS = {"acces": "Accès", "contrainte": "Contrainte", "etat_existant": "État existant",
-              "question": "Question", "constat": "Constat"}
-OBS_ORDER = ["acces", "contrainte", "etat_existant", "question", "constat"]
+              "question": "Question", "constat": "Constat", "manutention": "Manutention / Déplacement"}
+OBS_ORDER = ["acces", "contrainte", "etat_existant", "question", "constat", "manutention"]
 PROFIL_LABELS = {"estimateur": "Estimateur", "contremaitre": "Contremaître"}
 STATUT_LABELS = {"brouillon": "Brouillon", "finalise": "Finalisée"}
 
@@ -134,12 +134,20 @@ def _build_pdf(vis, projet_nom, notes, obs, photos, checklist):
     if obs:
         by = {}
         for o in obs:
-            by.setdefault(o["type"], []).append(o["texte"])
+            by.setdefault(o["type"], []).append(o)
         for ty in OBS_ORDER:
             if by.get(ty):
                 el.append(Paragraph(OBS_LABELS[ty], TYPE))
-                for txt in by[ty]:
-                    el.append(Paragraph("• " + escape(txt), BODY))
+                for o in by[ty]:
+                    el.append(Paragraph("• " + escape(o.get("texte") or ""), BODY))
+                    # Manutention : champs structurés (note de référence chiffrage).
+                    if ty == "manutention":
+                        if o.get("operation"):
+                            el.append(Paragraph("&nbsp;&nbsp;&nbsp;<b>Opération :</b> " + escape(o["operation"]), SMALL))
+                        if o.get("trajet"):
+                            el.append(Paragraph("&nbsp;&nbsp;&nbsp;<b>Trajet / moyen :</b> " + escape(o["trajet"]), SMALL))
+                        if o.get("temps_estime_min") is not None:
+                            el.append(Paragraph(f"&nbsp;&nbsp;&nbsp;<b>Temps estimé :</b> ~{int(o['temps_estime_min'])} min/opération", SMALL))
     else:
         el.append(Paragraph("Aucune observation.", SMALL))
 
@@ -200,7 +208,7 @@ def _fetch_report_data(cur, visite_id, org):
         return None
     cur.execute("SELECT texte FROM ad_vis.notes WHERE visite_id = %s AND deleted_at IS NULL ORDER BY ordre, id", (visite_id,))
     notes = cur.fetchall()
-    cur.execute("SELECT type, texte FROM ad_vis.observations WHERE visite_id = %s AND deleted_at IS NULL ORDER BY ordre, id", (visite_id,))
+    cur.execute("SELECT type, texte, operation, trajet, temps_estime_min FROM ad_vis.observations WHERE visite_id = %s AND deleted_at IS NULL ORDER BY ordre, id", (visite_id,))
     obs = cur.fetchall()
     # Feuilles seulement : la version annotée (si elle existe) remplace l'originale.
     cur.execute(

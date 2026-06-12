@@ -14,11 +14,28 @@ renvoient que les éléments non supprimés.
 from fastapi import APIRouter, Body, Depends, HTTPException
 from psycopg.rows import dict_row
 
-OBS_TYPES = ("acces", "contrainte", "etat_existant", "question", "constat")
+OBS_TYPES = ("acces", "contrainte", "etat_existant", "question", "constat", "manutention")
 
 
 def _iso(v):
     return v.isoformat() if v else None
+
+
+def _parse_manut(data):
+    """Champs structurés « manutention » (optionnels ; pertinents pour type=
+    'manutention'). operation/trajet = texte libre. temps_estime_min = entier
+    minutes — NOTE DE RÉFÉRENCE (Ad FLO ne calcule rien). 400 si non entier."""
+    operation = (data.get("operation") or "").strip() or None
+    trajet = (data.get("trajet") or "").strip() or None
+    t = data.get("temps_estime_min")
+    if t in (None, ""):
+        temps = None
+    else:
+        try:
+            temps = int(t)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="temps_estime_min doit être un entier (minutes)")
+    return operation, trajet, temps
 
 
 def _serialize_note(r):
@@ -33,6 +50,9 @@ def _serialize_obs(r):
     return {
         "id": r["id"], "visite_id": r["visite_id"], "type": r["type"],
         "texte": r["texte"], "ordre": r["ordre"],
+        # Champs « manutention » (NULL pour les autres types).
+        "operation": r.get("operation"), "trajet": r.get("trajet"),
+        "temps_estime_min": r.get("temps_estime_min"),
         "created_at": _iso(r.get("created_at")), "updated_at": _iso(r.get("updated_at")),
     }
 
@@ -168,6 +188,7 @@ def register_capture_routes(get_conn, jwt_user):
         texte = (data.get("texte") or "").strip()
         if not texte:
             raise HTTPException(status_code=400, detail="texte requis (non vide)")
+        operation, trajet, temps = _parse_manut(data)
         conn = get_conn()
         try:
             cur = conn.cursor(row_factory=dict_row)
@@ -175,13 +196,15 @@ def register_capture_routes(get_conn, jwt_user):
                 _assert_visite_org(cur, visite_id, user["organization_id"])
                 cur.execute(
                     """
-                    INSERT INTO ad_vis.observations (visite_id, type, texte, ordre)
-                    VALUES (%s, %s, %s, COALESCE(
+                    INSERT INTO ad_vis.observations
+                      (visite_id, type, texte, operation, trajet, temps_estime_min, ordre)
+                    VALUES (%s, %s, %s, %s, %s, %s, COALESCE(
                       (SELECT MAX(ordre) + 1 FROM ad_vis.observations
                        WHERE visite_id = %s AND deleted_at IS NULL), 0))
-                    RETURNING id, visite_id, type, texte, ordre, created_at, updated_at
+                    RETURNING id, visite_id, type, texte, operation, trajet, temps_estime_min,
+                              ordre, created_at, updated_at
                     """,
-                    (visite_id, type_, texte, visite_id),
+                    (visite_id, type_, texte, operation, trajet, temps, visite_id),
                 )
                 row = cur.fetchone()
                 conn.commit()
@@ -200,7 +223,8 @@ def register_capture_routes(get_conn, jwt_user):
                 _assert_visite_org(cur, visite_id, user["organization_id"])
                 cur.execute(
                     """
-                    SELECT id, visite_id, type, texte, ordre, created_at, updated_at
+                    SELECT id, visite_id, type, texte, operation, trajet, temps_estime_min,
+                           ordre, created_at, updated_at
                     FROM ad_vis.observations
                     WHERE visite_id = %s AND deleted_at IS NULL
                     ORDER BY ordre ASC, id ASC
@@ -226,8 +250,22 @@ def register_capture_routes(get_conn, jwt_user):
             if not texte:
                 raise HTTPException(status_code=400, detail="texte ne peut pas être vide")
             sets.append("texte = %s"); params.append(texte)
+        if "operation" in data:
+            sets.append("operation = %s"); params.append((data.get("operation") or "").strip() or None)
+        if "trajet" in data:
+            sets.append("trajet = %s"); params.append((data.get("trajet") or "").strip() or None)
+        if "temps_estime_min" in data:
+            t = data.get("temps_estime_min")
+            if t in (None, ""):
+                params.append(None)
+            else:
+                try:
+                    params.append(int(t))
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=400, detail="temps_estime_min doit être un entier (minutes)")
+            sets.append("temps_estime_min = %s")
         if not sets:
-            raise HTTPException(status_code=400, detail="Aucun champ modifiable (type/texte)")
+            raise HTTPException(status_code=400, detail="Aucun champ modifiable (type/texte/operation/trajet/temps_estime_min)")
         sets.append("updated_at = NOW()")
         conn = get_conn()
         try:
@@ -239,7 +277,8 @@ def register_capture_routes(get_conn, jwt_user):
                     FROM ad_vis.visites v
                     WHERE o.id = %s AND o.visite_id = v.id
                       AND v.organization_id = %s AND o.deleted_at IS NULL
-                    RETURNING o.id, o.visite_id, o.type, o.texte, o.ordre, o.created_at, o.updated_at
+                    RETURNING o.id, o.visite_id, o.type, o.texte, o.operation, o.trajet,
+                              o.temps_estime_min, o.ordre, o.created_at, o.updated_at
                     """,
                     params + [obs_id, user["organization_id"]],
                 )
