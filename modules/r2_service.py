@@ -93,6 +93,17 @@ def generate_download_url(r2_key: str, filename: str, expires_in: int = DEFAULT_
         raise RuntimeError(f"Échec génération URL download : {e}") from e
 
 
+def get_bytes(r2_key: str) -> bytes:
+    """Récupère les bytes d'un objet R2 côté SERVEUR (get_object) — utilisé pour
+    intégrer les photos dans le PDF sans passer par une URL signée publique."""
+    s3 = get_s3_client()
+    try:
+        resp = s3.get_object(Bucket=_bucket_name(), Key=r2_key)
+        return resp["Body"].read()
+    except ClientError as e:
+        raise RuntimeError(f"Échec lecture R2 : {e}") from e
+
+
 def delete_object(r2_key: str) -> bool:
     """Suppression PHYSIQUE R2 — NON appelée par le soft-delete (réversibilité).
     Réservée à une purge admin différée (rétention)."""

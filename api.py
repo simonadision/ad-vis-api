@@ -19,6 +19,7 @@ from modules.vis_api import register_vis_routes
 from modules.capture_api import register_capture_routes
 from modules.photos_api import register_photos_routes
 from modules.checklist_api import register_checklist_routes
+from modules.report_pdf_api import register_report_routes
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
@@ -116,6 +117,7 @@ app.include_router(register_vis_routes(get_conn, jwt_user))
 app.include_router(register_capture_routes(get_conn, jwt_user))
 app.include_router(register_photos_routes(get_conn, jwt_user))
 app.include_router(register_checklist_routes(get_conn, jwt_user))
+app.include_router(register_report_routes(get_conn, jwt_user))
 
 
 @app.get("/")
