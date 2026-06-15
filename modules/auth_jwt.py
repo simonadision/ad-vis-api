@@ -148,6 +148,15 @@ def make_jwt_deps(get_conn):
                 status_code=403,
                 detail="Ad VIS n'est pas activé pour votre organisation",
             )
+        # DOUBLE FILET (migration 089) : flag PER-USER Ad VIS via le claim JWT `modules`
+        # (dérivé de users.has_ad_vis). L'org reste le plafond (allowlist ci-dessus) ;
+        # ce flag décide par utilisateur. NB : un token émis AVANT 089 n'a pas 'ad_vis'
+        # dans modules → 403 jusqu'à la prochaine connexion (re-login régénère le claim).
+        if REQUIRED_MODULE not in (payload.get("modules") or []):
+            raise HTTPException(
+                status_code=403,
+                detail="Ad VIS n'est pas activé pour cet utilisateur",
+            )
         conn = get_conn()
         try:
             user = _provision_user(conn, payload)
