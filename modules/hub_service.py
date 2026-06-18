@@ -86,6 +86,24 @@ def list_org_projects(jwt_token: str, limit: int = 200) -> list:
     return data.get("projects", []) or []
 
 
+def create_project(jwt_token: str, body: dict) -> dict:
+    """Crée un projet dans Ad HUB (POST HUB /api/projects) — création MINIMALE
+    depuis Ad VIS (nom + type_mandat ; le code est auto-généré par le gabarit de
+    l'org côté HUB). Retourne la row projet (déballe {"project": {...}}). Lève
+    HubServiceError si non-2xx (le caller renvoie un message clair, pas de blocage)."""
+    raw = _hub_post("/api/projects", jwt_token, body)
+    proj = raw.get("project") if isinstance(raw, dict) and isinstance(raw.get("project"), dict) else raw
+    if not proj or "id" not in proj:
+        raise HubServiceError(502, f"Réponse Ad HUB sans project.id : {str(raw)[:200]}")
+    return proj
+
+
+def get_codification(jwt_token: str) -> dict:
+    """Gabarit de codification de l'org + APERÇU du prochain code projet
+    (GET HUB /api/organization/codification). Retourne {codification, preview}."""
+    return _hub_get("/api/organization/codification", jwt_token)
+
+
 # ── Employés + postes de l'org (Brique B — modale création) ─────────────────
 def list_org_users(jwt_token: str) -> list:
     """Users de l'org (proxy GET HUB /api/organization/users, JWT forwardé →

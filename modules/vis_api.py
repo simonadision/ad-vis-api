@@ -64,6 +64,44 @@ def register_vis_routes(get_conn, jwt_user):
             ]
         }
 
+    # ── Aperçu du code projet (gabarit de l'org) — modale « + Nouveau projet » ──
+    @router.get("/v2/codification-preview")
+    def codification_preview(user=Depends(jwt_user)):
+        """Aperçu illustratif du prochain code projet (gabarit de l'org, proxy HUB)."""
+        try:
+            data = hub_service.get_codification(user["_jwt"])
+        except hub_service.HubServiceError as e:
+            raise HTTPException(status_code=e.status_code or 502, detail=f"Ad HUB : {e.detail}")
+        return {"preview": data.get("preview"), "codification": data.get("codification")}
+
+    # ── POST création MINIMALE d'un projet (nom + type_mandat) via le HUB ──────
+    # Ad VIS n'a PAS de table projets : les visites référencent central_project_id
+    # (= id hub). On crée donc la fiche dans Ad HUB et on renvoie son id + code
+    # (auto-généré par le gabarit de l'org) pour démarrer la visite immédiatement.
+    _VIS_TYPE_MANDATS = ("soumission", "budget", "services")
+
+    @router.post("/vis/projets/create-via-hub", status_code=201)
+    def create_projet_via_hub(data: dict = Body(...), user=Depends(jwt_user)):
+        name = (data.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Nom du projet requis")
+        type_mandat = (data.get("type_mandat") or "").strip() or None
+        if type_mandat and type_mandat not in _VIS_TYPE_MANDATS:
+            raise HTTPException(status_code=422,
+                                detail=f"type_mandat invalide (valeurs : {', '.join(_VIS_TYPE_MANDATS)})")
+        body = {"name": name, "type_mandat": type_mandat, "source": "ad_vis"}
+        # Synchrone : l'utilisateur attend de pouvoir démarrer sa visite. Hub down /
+        # rejet -> 502 avec message clair (le front réessaie, l'app n'est pas bloquée).
+        try:
+            proj = hub_service.create_project(user["_jwt"], body)
+        except hub_service.HubServiceError as e:
+            raise HTTPException(status_code=502, detail=f"Échec création projet dans Ad HUB : {e.detail}")
+        return {"project": {
+            "id": proj.get("id"), "name": proj.get("name"),
+            "code": proj.get("code"), "statut": proj.get("statut"),
+            "client_nom": proj.get("client_nom"),
+        }}
+
     # ── Proxy : employés + postes de l'org (modale création, Brique B) ─────
     @router.get("/v2/org-users")
     def org_users(user=Depends(jwt_user)):
