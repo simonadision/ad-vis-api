@@ -18,10 +18,15 @@ import os
 from typing import Optional
 
 import jwt
-from fastapi import Header, HTTPException, Query
+from fastapi import Cookie, Header, HTTPException, Query
 from psycopg.rows import dict_row
 
 JWT_ALGORITHM = "HS256"
+
+# Étape 1 SSO (juin 2026) — cookie de session cross-subdomain ADDITIF.
+# Lu en dernier ressort par `_extract_bearer`. Posé par adision-app-api
+# au login. Si absent, le système header/query reste fonctionnel.
+SESSION_COOKIE_NAME = "__Secure-adision-session"
 # Sprint 0 souple : conservé pour le jour où on réactive le gating.
 REQUIRED_MODULE = "ad_vis"
 
@@ -58,8 +63,13 @@ def _derive_platform_role(role):
     return "client"
 
 
-def _extract_bearer(authorization: Optional[str], token_query: Optional[str] = None) -> str:
-    """Lit le JWT du header `Authorization: Bearer <jwt>` ou du query `?token=`."""
+def _extract_bearer(
+    authorization: Optional[str],
+    token_query: Optional[str] = None,
+    session_cookie: Optional[str] = None,
+) -> str:
+    """Lit le JWT du header `Authorization: Bearer <jwt>`, du query `?token=`
+    ou du cookie de session cross-subdomain (étape 1 SSO, juin 2026)."""
     if authorization:
         parts = authorization.split(" ", 1)
         if len(parts) == 2 and parts[0].lower() == "bearer" and parts[1].strip():
@@ -67,6 +77,8 @@ def _extract_bearer(authorization: Optional[str], token_query: Optional[str] = N
         raise HTTPException(status_code=401, detail="Header Authorization mal formé (attendu : Bearer <JWT>)")
     if token_query:
         return token_query.strip()
+    if session_cookie:
+        return session_cookie.strip()
     raise HTTPException(status_code=401, detail="Authentification requise (header Authorization: Bearer <JWT>)")
 
 
@@ -131,11 +143,12 @@ def make_jwt_deps(get_conn):
     def jwt_user(
         authorization: Optional[str] = Header(None),
         token: Optional[str] = Query(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
     ) -> dict:
-        """Standard : JWT via header ou `?token=`. Vérifie signature, AUCUN
-        gating de module (souple Sprint 0), auto-provisionne le user, retourne
-        le row local enrichi (organization_id, platform_role, modules)."""
-        jwt_token = _extract_bearer(authorization, token)
+        """Standard : JWT via header, `?token=` ou cookie de session (étape 1 SSO).
+        Vérifie signature, AUCUN gating de module (souple Sprint 0),
+        auto-provisionne le user, retourne le row local enrichi."""
+        jwt_token = _extract_bearer(authorization, token, session_cookie)
         payload = _decode_token(jwt_token)
         # Workspace Switcher (035) : active_organization_id prime sur le legacy.
         org_id = payload.get("active_organization_id") or payload.get("organization_id")
@@ -175,10 +188,11 @@ def make_jwt_deps(get_conn):
     def jwt_super_admin(
         authorization: Optional[str] = Header(None),
         token: Optional[str] = Query(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
     ) -> dict:
         """Endpoints d'administration plateforme (super_admin). Pas de
         provisioning local ; retourne le payload JWT."""
-        jwt_token = _extract_bearer(authorization, token)
+        jwt_token = _extract_bearer(authorization, token, session_cookie)
         payload = _decode_token(jwt_token)
         platform_role = (
             payload.get("platform_role") or _derive_platform_role(payload.get("role"))
