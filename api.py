@@ -62,13 +62,35 @@ def _bootstrap_db():
             _log("dossier migrations/ absent — abort")
             return
         files = sorted(migrations_dir.glob("*.sql"))
-        _log(f"fichiers SQL trouvés ({len(files)}) : {[f.name for f in files]}")
+        _log(f"fichiers SQL trouvés ({len(files)})")
+        # ── Phase K2-3 étape 2 (29 juin 2026) — tracking schema_migrations ──
+        # Pattern verbatim du pilote est-api K2-3.1 (SHA 2b17dc8). Schéma
+        # ad_vis (créé par mig 001).
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS ad_vis.schema_migrations ("
+            "  filename TEXT PRIMARY KEY,"
+            "  applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+            ")"
+        )
+        conn.commit()
+        cur.execute("SELECT filename FROM ad_vis.schema_migrations")
+        done = {r[0] for r in cur.fetchall()}
+        cur.close()
+        _log(f"schema_migrations : {len(done)} déjà appliquées / {len(files)} fichiers")
         for f in files:
+            if f.name in done:
+                continue
             sql = f.read_text(encoding="utf-8")
             _log(f"exécution de {f.name} ({len(sql)} chars)...")
             cur = conn.cursor()
             try:
                 cur.execute(sql)
+                cur.execute(
+                    "INSERT INTO ad_vis.schema_migrations (filename) "
+                    "VALUES (%s) ON CONFLICT (filename) DO NOTHING",
+                    (f.name,),
+                )
                 conn.commit()
                 _log(f"{f.name} ✓")
             except Exception as e:
@@ -85,10 +107,16 @@ def _bootstrap_db():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("[lifespan] startup hook fired", flush=True)
+    # Phase K2-3 étape 2 — B3 boot fatal (pattern pilote est-api 2b17dc8).
     try:
         _bootstrap_db()
     except Exception as e:
-        print(f"[lifespan] bootstrap failed (app boots anyway): {e}", flush=True)
+        print(
+            f"[lifespan] FATAL — bootstrap échoué, boot refusé : "
+            f"{type(e).__name__} : {e}",
+            flush=True,
+        )
+        raise
     print("[lifespan] startup complete, accepting requests", flush=True)
     yield
     print("[lifespan] shutdown", flush=True)
