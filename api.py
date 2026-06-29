@@ -97,19 +97,29 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Adision Ad VIS API", lifespan=lifespan)
 
 # CORS — dashboard + prod Ad VIS (vis.adision.ca + futur vis.adflo.ca) + dev local.
+#
+# Phase I étape 3 (juin 2026) — extrait en constante CORS_ALLOWED_ORIGINS
+# pour DRY avec le middleware origin_guard. Inclut vis.adflo.ca/app.adflo.ca
+# pour les flux ad-join cross-eTLD.
+CORS_ALLOWED_ORIGINS = [
+    "https://app.adision.ca",
+    "https://vis.adision.ca",
+    "https://vis.adflo.ca",      # migration domaine (chantier week-end)
+    "https://app.adflo.ca",
+    "http://localhost:5173",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://app.adision.ca",
-        "https://vis.adision.ca",
-        "https://vis.adflo.ca",      # migration domaine (chantier week-end)
-        "https://app.adflo.ca",
-        "http://localhost:5173",
-    ],
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Phase I étape 3 — middleware Origin/Referer CSRF (ENFORCE) ──────
+# Pattern identique au hub (SHA 9c58e94). Discriminant cookie SSO.
+from modules.origin_guard import install_origin_guard
+install_origin_guard(app, cors_allowed_origins=CORS_ALLOWED_ORIGINS, log_only=False)
 
 # JWT deps — souple Sprint 0 (jwt_user ne gate PAS le module ad_vis).
 jwt_user, jwt_super_admin = make_jwt_deps(get_conn)
