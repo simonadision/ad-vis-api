@@ -19,6 +19,8 @@ from typing import Optional
 
 import jwt
 from fastapi import Cookie, Header, HTTPException, Query
+
+from modules.revocation_cache import is_token_revoked
 from psycopg.rows import dict_row
 
 JWT_ALGORITHM = "HS256"
@@ -150,6 +152,14 @@ def make_jwt_deps(get_conn):
         auto-provisionne le user, retourne le row local enrichi."""
         jwt_token = _extract_bearer(authorization, token, session_cookie)
         payload = _decode_token(jwt_token)
+        # Phase J3 étape 3 — kill-switch satellite (cat.2, endpoint hub
+        # + cache TTL 60s). Voir modules/revocation_cache.py. Fail-open
+        # défensif si erreur (ne propage jamais de 500).
+        if is_token_revoked(payload.get("user_id"), payload.get("iat")):
+            raise HTTPException(
+                status_code=401,
+                detail="Session révoquée — reconnexion requise",
+            )
         # Workspace Switcher (035) : active_organization_id prime sur le legacy.
         org_id = payload.get("active_organization_id") or payload.get("organization_id")
         # Garde-fou allowlist d'orgs — AVANT le provisioning (aucune row ad_vis.users
@@ -194,6 +204,13 @@ def make_jwt_deps(get_conn):
         provisioning local ; retourne le payload JWT."""
         jwt_token = _extract_bearer(authorization, token, session_cookie)
         payload = _decode_token(jwt_token)
+        # Phase J3 étape 3 — kill-switch satellite (cat.2). Un super_admin
+        # révoqué est révoqué partout, donc check identique à jwt_user.
+        if is_token_revoked(payload.get("user_id"), payload.get("iat")):
+            raise HTTPException(
+                status_code=401,
+                detail="Session révoquée — reconnexion requise",
+            )
         platform_role = (
             payload.get("platform_role") or _derive_platform_role(payload.get("role"))
         )
