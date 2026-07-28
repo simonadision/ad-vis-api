@@ -155,6 +155,12 @@ def register_capture_routes(get_conn, jwt_user):
             sets.append("valide_at = " + ("NOW()" if data.get("valide") else "NULL"))
         sets.append("updated_at = NOW()")
 
+        # VERROU — une note VALIDÉE est intouchable : son contenu ne peut plus
+        # changer tant qu'elle n'a pas été dévalidée explicitement. Le filet
+        # est ici, pas seulement dans l'écran : un rapport de visite fait foi.
+        # La dévalidation elle-même (valide=false) reste évidemment permise.
+        lock = "" if has_valide else " AND n.valide_at IS NULL"
+
         conn = get_conn()
         try:
             cur = conn.cursor(row_factory=dict_row)
@@ -164,7 +170,7 @@ def register_capture_routes(get_conn, jwt_user):
                     UPDATE ad_vis.notes n SET {", ".join(sets)}
                     FROM ad_vis.visites v
                     WHERE n.id = %s AND n.visite_id = v.id
-                      AND v.organization_id = %s AND n.deleted_at IS NULL
+                      AND v.organization_id = %s AND n.deleted_at IS NULL{lock}
                     RETURNING n.id, n.visite_id, n.texte, n.ordre, n.created_at,
                               n.updated_at, n.valide_at
                     """,
@@ -177,7 +183,12 @@ def register_capture_routes(get_conn, jwt_user):
         finally:
             conn.close()
         if not row:
-            raise HTTPException(status_code=404, detail="Note introuvable")
+            # Aucune ligne touchée : soit la note n'existe pas / n'appartient
+            # pas à l'organisation, soit elle est VALIDÉE (verrou ci-dessus).
+            raise HTTPException(
+                status_code=404,
+                detail="Note introuvable, ou validée — dévalidez-la avant de la modifier.",
+            )
         return {"note": _serialize_note(row)}
 
     @router.delete("/api/notes/{note_id}")
@@ -192,6 +203,9 @@ def register_capture_routes(get_conn, jwt_user):
                     FROM ad_vis.visites v
                     WHERE n.id = %s AND n.visite_id = v.id
                       AND v.organization_id = %s AND n.deleted_at IS NULL
+                      -- VERROU : une note validée ne se supprime pas (il faut
+                      -- la dévalider d'abord). Cf. patch_note.
+                      AND n.valide_at IS NULL
                     RETURNING n.id
                     """,
                     (note_id, user["organization_id"]),
@@ -301,6 +315,9 @@ def register_capture_routes(get_conn, jwt_user):
         if not sets:
             raise HTTPException(status_code=400, detail="Aucun champ modifiable (type/texte/operation/trajet/temps_estime_min/valide)")
         sets.append("updated_at = NOW()")
+        # VERROU — même règle que les notes : une observation validée est
+        # intouchable tant qu'elle n'a pas été dévalidée.
+        lock = "" if "valide" in data else " AND o.valide_at IS NULL"
         conn = get_conn()
         try:
             cur = conn.cursor(row_factory=dict_row)
@@ -310,7 +327,7 @@ def register_capture_routes(get_conn, jwt_user):
                     UPDATE ad_vis.observations o SET {', '.join(sets)}
                     FROM ad_vis.visites v
                     WHERE o.id = %s AND o.visite_id = v.id
-                      AND v.organization_id = %s AND o.deleted_at IS NULL
+                      AND v.organization_id = %s AND o.deleted_at IS NULL{lock}
                     RETURNING o.id, o.visite_id, o.type, o.texte, o.operation, o.trajet,
                               o.temps_estime_min, o.ordre, o.created_at, o.updated_at,
                               o.valide_at
@@ -339,6 +356,9 @@ def register_capture_routes(get_conn, jwt_user):
                     FROM ad_vis.visites v
                     WHERE o.id = %s AND o.visite_id = v.id
                       AND v.organization_id = %s AND o.deleted_at IS NULL
+                      -- VERROU : une observation validée ne se supprime pas
+                      -- (il faut la dévalider d'abord). Cf. patch_obs.
+                      AND o.valide_at IS NULL
                     RETURNING o.id
                     """,
                     (obs_id, user["organization_id"]),
