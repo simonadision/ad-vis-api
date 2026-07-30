@@ -86,6 +86,17 @@ def list_org_projects(jwt_token: str, limit: int = 200) -> list:
     return data.get("projects", []) or []
 
 
+def delete_project(jwt_token: str, project_id) -> None:
+    """Supprime un projet dans Ad HUB (DELETE HUB /api/projects/{id}).
+
+    Le HUB pratique un SOFT-DELETE (deleted_at) et valide lui-même les droits
+    et l'organization_id à partir du JWT forwardé : Ad VIS ne décide rien, il
+    relaie. Un projet n'appartient pas à Ad VIS — le supprimer d'ici le retire
+    donc de TOUS les modules, ce que l'écran doit dire clairement.
+    """
+    _hub_delete(f"/api/projects/{project_id}", jwt_token)
+
+
 def create_project(jwt_token: str, body: dict) -> dict:
     """Crée un projet dans Ad HUB (POST HUB /api/projects) — création MINIMALE
     depuis Ad VIS (nom + type_mandat ; le code est auto-généré par le gabarit de

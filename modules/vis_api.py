@@ -64,6 +64,22 @@ def register_vis_routes(get_conn, jwt_user):
             ]
         }
 
+    # ── Proxy : suppression d'un projet HUB depuis la carte de sélection ──────
+    @router.delete("/v2/ad-hub-projects/{project_id}", status_code=200)
+    def delete_ad_hub_project(project_id: int, user=Depends(jwt_user)):
+        """Supprime un projet (proxy DELETE HUB /api/projects/{id}).
+
+        Ad VIS n'a pas de table projets : il n'y a donc rien à détacher côté
+        Ad VIS, la suppression porte sur la fiche Ad HUB elle-même. Le HUB
+        applique son soft-delete et vérifie les droits à partir du JWT
+        forwardé — aucune décision d'autorisation n'est prise ici.
+        """
+        try:
+            hub_service.delete_project(user["_jwt"], project_id)
+        except hub_service.HubServiceError as e:
+            raise HTTPException(status_code=e.status_code or 502, detail=f"Ad HUB : {e.detail}")
+        return {"deleted": True, "id": project_id}
+
     # ── Aperçu du code projet (gabarit de l'org) — modale « + Nouveau projet » ──
     @router.get("/v2/codification-preview")
     def codification_preview(user=Depends(jwt_user)):
