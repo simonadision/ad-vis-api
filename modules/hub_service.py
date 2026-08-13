@@ -78,7 +78,13 @@ def _hub_delete(path: str, jwt_token: str) -> None:
 
 
 def _hub_patch(path: str, jwt_token: str, body: dict) -> dict:
-    """PATCH JSON vers Ad HUB avec Bearer JWT user. Lève HubServiceError si non-2xx."""
+    """PATCH JSON vers Ad HUB avec Bearer JWT user. Lève HubServiceError si non-2xx.
+
+    SANS APPELANT depuis le 2026-08-14 : son seul usage était de basculer
+    `modules_actifs.ad_vis` (voir la note historique plus bas). Conservé comme
+    primitive, mais réfléchir à deux fois avant de la rebrancher — Ad VIS n'a
+    plus aucune raison d'écrire dans la fiche projet du hub.
+    """
     target_url = f"{HUB_API_URL}{path}"
     try:
         with httpx.Client(timeout=HUB_TIMEOUT_S) as client:
@@ -96,42 +102,94 @@ def _hub_patch(path: str, jwt_token: str, body: dict) -> dict:
 
 
 def list_org_projects(jwt_token: str, limit: int = 200) -> list:
-    """Liste les projets de l'org active de l'utilisateur (GET HUB /api/projects).
-    Retourne la liste des projets (dicts : id, name, code, statut, client_nom…)."""
+    """Catalogue BRUT des projets de l'org (GET HUB /api/projects).
+
+    Sert UNIQUEMENT à alimenter la modale « Nouveau projet » : c'est le
+    catalogue dans lequel on vient piocher. L'écran de sélection d'Ad VIS, lui,
+    lit ad_vis.vis_projects (opt-in) — voir migration 012.
+
+    Plus aucun filtre ici. Le filtrage opt-OUT (modules_actifs.ad_vis) posé le
+    2026-08-13 est remplacé par l'opt-IN de la table de liaison : retirer les
+    projets un par un était l'inverse du besoin de Simon.
+
+    Retourne la liste des projets (dicts : id, name, code, statut, client_nom…).
+    """
     data = _hub_get(f"/api/projects?limit={int(limit)}", jwt_token)
     if isinstance(data, list):
         return data
     return data.get("projects", []) or []
 
 
-def retirer_projet_du_module(jwt_token: str, project_id) -> dict:
-    """Retire un projet de la liste d'Ad VIS — SANS le supprimer.
+def fetch_hub_project(jwt_token: str, project_id) -> dict:
+    """Fiche d'UN projet hub, pour alimenter le cache d'affichage à la liaison.
 
-    Incident du 13 août 2026 : cette fonction appelait
-    `DELETE /api/projects/{id}`, c'est-à-dire le soft-delete d'Ad HUB. Un
-    utilisateur qui « nettoyait » sa liste Ad VIS effaçait donc les projets de
-    TOUS les modules à la fois. Règle posée par Simon à la suite de
-    l'incident : supprimer dans un module ne retire QUE du module, le projet
-    continue de vivre ailleurs.
-
-    On bascule donc le drapeau `modules_actifs.ad_vis` à false. La fiche
-    projet reste intacte dans Ad HUB, Ad BUD, Ad FAC et les autres.
-
-    ⚠ On RELIT les drapeaux avant d'écrire et on renvoie le jeu COMPLET.
-    Le validateur du hub (`_validate_modules_actifs`) force à False toute clé
-    absente du payload : envoyer `{"ad_vis": false}` seul désactiverait Ad BUD,
-    Ad EST et tous les autres d'un coup. La fusion se fait donc ici plutôt que
-    de modifier la sémantique du PATCH côté hub, dont dépend le wizard.
+    Déballe {"project": {...}} quand le hub enveloppe sa réponse. Lève
+    HubServiceError : l'appelant décide si l'absence de libellé est bloquante
+    (elle ne l'est pas — le cache est un confort, pas une condition).
     """
-    raw = _hub_get(f"/api/projects/{project_id}", jwt_token)
-    proj = raw.get("project") if isinstance(raw, dict) and isinstance(raw.get("project"), dict) else raw
-    courants = (proj or {}).get("modules_actifs") or {}
-    if not isinstance(courants, dict):
-        courants = {}
-    fusion = dict(courants)
-    fusion["ad_vis"] = False
-    return _hub_patch(f"/api/projects/{project_id}", jwt_token,
-                      {"modules_actifs": fusion})
+    raw = _hub_get(f"/api/projects/{int(project_id)}", jwt_token)
+    if isinstance(raw, dict) and isinstance(raw.get("project"), dict):
+        return raw["project"]
+    return raw if isinstance(raw, dict) else {}
+
+
+def fetch_libelles_arborescence(jwt_token: str) -> dict:
+    """Correspondance segment de code -> nom complet, + sections de l'arbre.
+
+    Alimente la modale « Nouveau projet », qui reconstruit l'arborescence a
+    partir des codes projet (le code EST le chemin). Confort d'affichage
+    uniquement : sans ces libelles la modale montre les segments bruts
+    (CED, AOPU) au lieu des noms complets. NE RAISE JAMAIS — une modale qui
+    refuse de s'ouvrir parce qu'un libelle manque rendrait la liaison
+    impossible, donc l'opt-in inapplicable.
+    """
+    vide = {"libelles": {}, "sections": []}
+    if not jwt_token:
+        return vide
+    try:
+        data = _hub_get("/api/codification/libelles", jwt_token)
+    except Exception:
+        return vide
+    if not isinstance(data, dict):
+        return vide
+    return {
+        "libelles": data.get("libelles") or {},
+        "sections": data.get("sections") or [],
+    }
+
+
+def hub_project_belongs_to_org(jwt_token: str, project_id) -> bool:
+    """Vérifie que le projet appartient à l'org du user courant (via le hub).
+
+    True s'il figure dans le catalogue retourné par list_org_projects, False
+    sinon. Appelé AVANT toute insertion dans ad_vis.vis_projects : Ad VIS ne
+    décide pas des droits, il les fait trancher par le hub.
+    """
+    try:
+        return any(
+            int(p.get("id")) == int(project_id)
+            for p in list_org_projects(jwt_token)
+            if p.get("id") is not None
+        )
+    except Exception:
+        return False
+
+
+# NOTE HISTORIQUE — `retirer_projet_du_module` a vécu ici du 2026-08-13 au
+# 2026-08-14. Elle basculait `modules_actifs.ad_vis` à false côté hub (avec
+# relecture-fusion des autres drapeaux, sans quoi le validateur du hub aurait
+# désactivé Ad BUD et Ad EST du même coup), parce qu'Ad VIS n'avait alors
+# aucune table de projets et que le seul moyen de masquer un projet était de
+# poser un drapeau sur le hub.
+#
+# Avec ad_vis.vis_projects (migration 012), l'appartenance est LOCALE : délier
+# = soft-delete de la ligne, dans vis_api. Plus besoin d'écrire dans le hub
+# pour gérer l'écran d'Ad VIS — un module qui n'écrit pas chez le voisin ne
+# peut pas casser le voisin.
+#
+# Ce qu'elle avait corrigé reste vrai et ne doit pas être défait : avant elle,
+# ce chemin appelait DELETE /api/projects/{id}, le soft-delete du hub. C'est
+# ce piège qui a détruit six projets de production via Ad VIS.
 
 
 def create_project(jwt_token: str, body: dict) -> dict:

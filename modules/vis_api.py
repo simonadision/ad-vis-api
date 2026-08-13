@@ -10,12 +10,15 @@ Sécurité multi-tenant : organization_id est TOUJOURS pris du JWT (jamais du
 payload). Les lectures/écritures sont scopées organization_id.
 """
 import datetime
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from psycopg.rows import dict_row
 
 from modules import hub_service
+
+logger = logging.getLogger("vis_api")
 
 PROFILS = ("estimateur", "contremaitre")
 STATUTS = ("brouillon", "finalise")
@@ -41,56 +44,251 @@ def _serialize_visite(r: dict) -> dict:
 def register_vis_routes(get_conn, jwt_user):
     router = APIRouter()
 
-    # ── Proxy : liste des projets HUB de l'org (pour l'écran de sélection) ──
+    # ── Projets LIÉS à Ad VIS (opt-in) — écran de sélection ─────────────────
     @router.get("/v2/ad-hub-projects")
     def ad_hub_projects(user=Depends(jwt_user)):
-        """Liste les projets de l'org (proxy GET HUB /api/projects, JWT user
-        forwardé → le HUB valide l'organization_id)."""
+        """Projets LIÉS à Ad VIS (opt-in) — plus toute la liste du hub.
+
+        Simon 2026-08-14 : « si j'ouvre un projet dans Ad HUB, 1 chance sur 10
+        que ce projet soit réalisé ». Cette route était un proxy direct vers
+        GET {hub}/api/projects : tous les projets de l'organisation
+        s'affichaient dans Ad VIS sans que personne ne les y ait mis. Pire, la
+        liste encombrée poussait à la « nettoyer » — c'est ce réflexe qui a
+        détruit six projets de production le 2026-08-13.
+
+        Désormais elle lit ad_vis.vis_projects (migration 012). L'identité est
+        rafraîchie depuis le hub quand il répond ; sinon on sert le cache local
+        pour que l'écran reste lisible sur un chantier mal couvert.
+        """
+        org_id = user.get("organization_id")
+        if not org_id:
+            return {"projects": []}
+
+        conn = get_conn()
         try:
-            projets = hub_service.list_org_projects(user["_jwt"])
+            cur = conn.cursor(row_factory=dict_row)
+            cur.execute(
+                """
+                SELECT central_project_id, name, code, client_name
+                  FROM ad_vis.vis_projects
+                 WHERE organization_id = %s AND deleted_at IS NULL
+                 ORDER BY created_at DESC
+                """,
+                (org_id,),
+            )
+            liens = cur.fetchall()
+        finally:
+            conn.close()
+
+        if not liens:
+            return {"projects": []}
+
+        # Identité fraîche = ENRICHISSEMENT seulement. Le hub ne peut plus
+        # ajouter de cartes ici, il ne fait que corriger les libellés.
+        frais: dict = {}
+        try:
+            for p in hub_service.list_org_projects(user["_jwt"]):
+                if p.get("id") is not None:
+                    frais[int(p["id"])] = p
+        except Exception:
+            logger.warning("[ad-vis] hub injoignable - ecran servi depuis le cache local")
+
+        hub_ok = bool(frais)
+        projects = []
+        for lien in liens:
+            pid = int(lien["central_project_id"])
+            hp = frais.get(pid)
+            # Lien vers un projet que le hub ne connaît plus (supprimé côté
+            # Ad HUB, ou hors périmètre de l'user) : on ne l'affiche pas. On ne
+            # le fait QUE si le hub a répondu — sinon une panne réseau viderait
+            # l'écran d'un inspecteur en pleine visite.
+            if hp is None:
+                if hub_ok:
+                    continue
+                hp = {}
+            projects.append({
+                "id": pid,
+                "name": hp.get("name") or lien.get("name") or "",
+                "code": hp.get("code") or lien.get("code") or "",
+                "statut": hp.get("statut"),
+                "client_nom": hp.get("client_nom") or lien.get("client_name") or "",
+            })
+        return {"projects": projects}
+
+    # ── Catalogue Ad HUB pour la modale « Nouveau projet » ───────────────────
+    # ORDRE DES ROUTES : /available AVANT tout /{project_id}. FastAPI résout
+    # dans l'ordre de déclaration ; un `/{project_id}` déclaré plus haut
+    # avalerait « available » et tenterait de l'interpréter comme un entier.
+    @router.get("/v2/ad-hub-projects/available")
+    def ad_hub_projects_available(user=Depends(jwt_user)):
+        """Catalogue Ad HUB dans lequel la modale vient piocher.
+
+        `already_imported` distingue « lier » de « rouvrir », pour qu'un même
+        projet ne soit jamais lié deux fois.
+        """
+        org_id = user.get("organization_id")
+        if not org_id:
+            return {"projects": [], "available": 0, "imported": 0,
+                    "libelles": {}, "sections": []}
+
+        conn = get_conn()
+        try:
+            cur = conn.cursor(row_factory=dict_row)
+            cur.execute(
+                "SELECT central_project_id FROM ad_vis.vis_projects "
+                "WHERE organization_id = %s AND deleted_at IS NULL",
+                (org_id,),
+            )
+            deja = {int(r["central_project_id"]) for r in cur.fetchall()}
+        finally:
+            conn.close()
+
+        try:
+            hub = hub_service.list_org_projects(user["_jwt"])
         except hub_service.HubServiceError as e:
             raise HTTPException(status_code=e.status_code or 502, detail=f"Ad HUB : {e.detail}")
-        # Projets RETIRÉS d'Ad VIS : on les masque ici, et seulement ici.
-        # Opt-OUT et non opt-in : par défaut un projet reste visible dans le
-        # module (comportement historique), il faut un retrait explicite pour
-        # qu'il disparaisse. L'inverse aurait vidé l'écran de tout le monde.
-        def _retire(p):
-            m = p.get("modules_actifs") or {}
-            return isinstance(m, dict) and m.get("ad_vis") is False
 
-        # On ne renvoie que ce dont l'écran de sélection a besoin.
+        projets = [
+            {
+                "id": p.get("id"),
+                "name": p.get("name") or p.get("nom") or "",
+                "code": p.get("code") or "",
+                "client_nom": p.get("client_nom") or "",
+                "already_imported": int(p["id"]) in deja,
+            }
+            for p in hub if p.get("id") is not None
+        ]
+        importes = sum(1 for p in projets if p["already_imported"])
+        # Libellés de l'arborescence : la modale reconstruit l'arbre depuis les
+        # codes et a besoin des noms complets. Best-effort — sans eux elle
+        # affiche les segments bruts, elle ne casse pas.
+        arbo = hub_service.fetch_libelles_arborescence(user["_jwt"])
         return {
-            "projects": [
-                {
-                    "id": p.get("id"),
-                    "name": p.get("name"),
-                    "code": p.get("code"),
-                    "statut": p.get("statut"),
-                    "client_nom": p.get("client_nom"),
-                }
-                for p in projets if not _retire(p)
-            ]
+            "projects": projets,
+            "available": len(projets) - importes,
+            "imported": importes,
+            "libelles": arbo["libelles"],
+            "sections": arbo["sections"],
         }
+
+    # ── Liaison d'un projet Ad HUB à Ad VIS (le geste explicite) ─────────────
+    @router.post("/v2/ad-hub-projects/link", status_code=201)
+    def link_ad_hub_project(data: dict = Body(...), user=Depends(jwt_user)):
+        """Lie un projet Ad HUB à Ad VIS. Idempotent : relier ne duplique pas.
+
+        C'est la SEULE porte d'entrée d'un projet dans Ad VIS depuis le
+        catalogue du hub (la création via `/vis/projets/create-via-hub` reste
+        l'autre chemin, pour un chantier qui n'existe pas encore).
+        """
+        org_id = user.get("organization_id")
+        if not org_id:
+            raise HTTPException(status_code=401, detail="organization_id absent du JWT")
+
+        brut = data.get("central_project_id", data.get("ad_hub_project_id"))
+        try:
+            pid = int(brut)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="central_project_id requis (entier)")
+
+        # Cloisonnement : le projet doit appartenir à l'org du JWT. Le hub est
+        # seul juge — Ad VIS ne décide pas des droits, il les vérifie.
+        if not hub_service.hub_project_belongs_to_org(user["_jwt"], pid):
+            raise HTTPException(
+                status_code=404,
+                detail="Projet introuvable dans Ad HUB pour votre organisation.",
+            )
+
+        conn = get_conn()
+        try:
+            cur = conn.cursor(row_factory=dict_row)
+            cur.execute(
+                "SELECT id FROM ad_vis.vis_projects "
+                "WHERE organization_id = %s AND central_project_id = %s "
+                "AND deleted_at IS NULL",
+                (org_id, pid),
+            )
+            if cur.fetchone():
+                return {"project": {"central_project_id": pid}, "idempotent": True}
+
+            fiche = {}
+            try:
+                fiche = hub_service.fetch_hub_project(user["_jwt"], pid) or {}
+            except Exception:
+                # Le cache d'affichage est un confort, pas une condition :
+                # une liaison ne doit pas échouer parce qu'un libellé manque.
+                logger.warning("[ad-vis] cache identite indisponible pour le projet %s", pid)
+
+            cur.execute(
+                """
+                INSERT INTO ad_vis.vis_projects
+                       (organization_id, central_project_id, name, code,
+                        client_name, linked_by)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    org_id, pid,
+                    fiche.get("name") or fiche.get("nom"),
+                    fiche.get("code") or fiche.get("code_court"),
+                    fiche.get("client_nom") or fiche.get("client_name"),
+                    user.get("email"),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        return {"project": {"central_project_id": pid}, "idempotent": False}
 
     # ── Retrait d'un projet de la liste Ad VIS (PAS une suppression) ─────────
     @router.delete("/v2/ad-hub-projects/{project_id}", status_code=200)
     def retirer_du_module(project_id: int, user=Depends(jwt_user)):
-        """Retire le projet de l'écran Ad VIS. Il reste intact ailleurs.
+        """Retire le projet de l'ÉCRAN Ad VIS — la fiche hub reste intacte.
 
-        Incident du 13 août 2026 : cette route appelait le soft-delete d'Ad HUB.
+        INCIDENT 2026-08-13 : cette route appelait le soft-delete d'Ad HUB.
         Nettoyer sa liste Ad VIS effaçait donc les projets de TOUS les modules.
-        Règle posée par Simon : supprimer dans un module ne retire QUE du
-        module. On bascule le drapeau `modules_actifs.ad_vis`, rien d'autre.
+        Six projets de production ont été perdus ce jour-là par ce chemin.
+
+        Règle désormais absolue : un projet ne se supprime que depuis Ad HUB.
+
+        2026-08-14 : le retrait est devenu PUREMENT LOCAL (soft-delete de la
+        ligne ad_vis.vis_projects, migration 012). Ad VIS n'écrit plus rien
+        dans le hub pour gérer son propre écran — un module qui n'écrit pas
+        chez le voisin ne peut pas casser le voisin. L'étape intermédiaire
+        (PATCH `modules_actifs.ad_vis`) n'a plus lieu d'être.
+
+        Les visites ne bougent pas : ad_vis.visites.central_project_id porte
+        l'id hub sans FK vers la table de liaison. Un projet délié puis relié
+        retrouve ses visites, ses photos et ses observations.
 
         La route garde le verbe DELETE pour ne pas casser les clients
         déployés ; c'est son EFFET qui change, et le corps de réponse le dit
         (`retire_du_module` plutôt que `deleted`).
         """
+        org_id = user.get("organization_id")
+        if not org_id:
+            raise HTTPException(status_code=401, detail="organization_id absent du JWT")
+
+        conn = get_conn()
         try:
-            hub_service.retirer_projet_du_module(user["_jwt"], project_id)
-        except hub_service.HubServiceError as e:
-            raise HTTPException(status_code=e.status_code or 502, detail=f"Ad HUB : {e.detail}")
-        return {"retire_du_module": True, "deleted": False, "id": project_id}
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE ad_vis.vis_projects SET deleted_at = now(), updated_at = now() "
+                "WHERE organization_id = %s AND central_project_id = %s "
+                "AND deleted_at IS NULL",
+                (org_id, project_id),
+            )
+            touche = cur.rowcount
+            conn.commit()
+        finally:
+            conn.close()
+
+        return {
+            "retire_du_module": True,
+            "deleted": False,
+            "id": project_id,
+            "etait_lie": touche > 0,
+        }
 
     # ── Aperçu du code projet (gabarit de l'org) — modale « + Nouveau projet » ──
     @router.get("/v2/codification-preview")
@@ -103,9 +301,13 @@ def register_vis_routes(get_conn, jwt_user):
         return {"preview": data.get("preview"), "codification": data.get("codification")}
 
     # ── POST création MINIMALE d'un projet (nom + type_mandat) via le HUB ──────
-    # Ad VIS n'a PAS de table projets : les visites référencent central_project_id
-    # (= id hub). On crée donc la fiche dans Ad HUB et on renvoie son id + code
+    # La fiche projet vit dans Ad HUB : les visites référencent central_project_id
+    # (= id hub). On crée donc la fiche là-bas et on renvoie son id + code
     # (auto-généré par le gabarit de l'org) pour démarrer la visite immédiatement.
+    # Depuis l'opt-in (migration 012), on LIE aussi le projet à Ad VIS dans la
+    # foulée : créer un chantier depuis Ad VIS est le geste explicite le plus
+    # fort qui soit, il serait absurde d'obliger à repasser par la modale de
+    # liaison pour retrouver, au retour, un projet qu'on vient d'ouvrir ici.
     _VIS_TYPE_MANDATS = ("soumission", "budget", "services")
 
     @router.post("/vis/projets/create-via-hub", status_code=201)
@@ -124,6 +326,35 @@ def register_vis_routes(get_conn, jwt_user):
             proj = hub_service.create_project(user["_jwt"], body)
         except hub_service.HubServiceError as e:
             raise HTTPException(status_code=502, detail=f"Échec création projet dans Ad HUB : {e.detail}")
+
+        # Liaison locale immédiate (voir le commentaire du bloc). Best-effort :
+        # la fiche existe déjà côté hub, un échec d'écriture ici ne doit pas
+        # transformer une création réussie en erreur. Au pire le projet se
+        # rattrape par la modale « Nouveau projet ».
+        org_id = user.get("organization_id")
+        pid = proj.get("id")
+        if org_id and pid is not None:
+            try:
+                conn = get_conn()
+                try:
+                    cur = conn.cursor()
+                    cur.execute(
+                        """
+                        INSERT INTO ad_vis.vis_projects
+                               (organization_id, central_project_id, name, code,
+                                client_name, linked_by)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (org_id, int(pid), proj.get("name"), proj.get("code"),
+                         proj.get("client_nom"), user.get("email")),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception:
+                logger.warning("[ad-vis] liaison locale echouee pour le projet %s", pid)
+
         return {"project": {
             "id": proj.get("id"), "name": proj.get("name"),
             "code": proj.get("code"), "statut": proj.get("statut"),
