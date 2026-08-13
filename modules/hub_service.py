@@ -77,6 +77,24 @@ def _hub_delete(path: str, jwt_token: str) -> None:
         raise HubServiceError(r.status_code, r.text[:200])
 
 
+def _hub_patch(path: str, jwt_token: str, body: dict) -> dict:
+    """PATCH JSON vers Ad HUB avec Bearer JWT user. Lève HubServiceError si non-2xx."""
+    target_url = f"{HUB_API_URL}{path}"
+    try:
+        with httpx.Client(timeout=HUB_TIMEOUT_S) as client:
+            r = client.patch(target_url, json=body,
+                             headers={"Authorization": f"Bearer {jwt_token}"})
+    except httpx.RequestError as e:
+        raise HubServiceError(None, f"Network error: {e}") from e
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("detail", r.text[:200])
+        except Exception:
+            detail = r.text[:200]
+        raise HubServiceError(r.status_code, str(detail))
+    return r.json() if r.content else {}
+
+
 def list_org_projects(jwt_token: str, limit: int = 200) -> list:
     """Liste les projets de l'org active de l'utilisateur (GET HUB /api/projects).
     Retourne la liste des projets (dicts : id, name, code, statut, client_nom…)."""
@@ -86,15 +104,34 @@ def list_org_projects(jwt_token: str, limit: int = 200) -> list:
     return data.get("projects", []) or []
 
 
-def delete_project(jwt_token: str, project_id) -> None:
-    """Supprime un projet dans Ad HUB (DELETE HUB /api/projects/{id}).
+def retirer_projet_du_module(jwt_token: str, project_id) -> dict:
+    """Retire un projet de la liste d'Ad VIS — SANS le supprimer.
 
-    Le HUB pratique un SOFT-DELETE (deleted_at) et valide lui-même les droits
-    et l'organization_id à partir du JWT forwardé : Ad VIS ne décide rien, il
-    relaie. Un projet n'appartient pas à Ad VIS — le supprimer d'ici le retire
-    donc de TOUS les modules, ce que l'écran doit dire clairement.
+    Incident du 13 août 2026 : cette fonction appelait
+    `DELETE /api/projects/{id}`, c'est-à-dire le soft-delete d'Ad HUB. Un
+    utilisateur qui « nettoyait » sa liste Ad VIS effaçait donc les projets de
+    TOUS les modules à la fois. Règle posée par Simon à la suite de
+    l'incident : supprimer dans un module ne retire QUE du module, le projet
+    continue de vivre ailleurs.
+
+    On bascule donc le drapeau `modules_actifs.ad_vis` à false. La fiche
+    projet reste intacte dans Ad HUB, Ad BUD, Ad FAC et les autres.
+
+    ⚠ On RELIT les drapeaux avant d'écrire et on renvoie le jeu COMPLET.
+    Le validateur du hub (`_validate_modules_actifs`) force à False toute clé
+    absente du payload : envoyer `{"ad_vis": false}` seul désactiverait Ad BUD,
+    Ad EST et tous les autres d'un coup. La fusion se fait donc ici plutôt que
+    de modifier la sémantique du PATCH côté hub, dont dépend le wizard.
     """
-    _hub_delete(f"/api/projects/{project_id}", jwt_token)
+    raw = _hub_get(f"/api/projects/{project_id}", jwt_token)
+    proj = raw.get("project") if isinstance(raw, dict) and isinstance(raw.get("project"), dict) else raw
+    courants = (proj or {}).get("modules_actifs") or {}
+    if not isinstance(courants, dict):
+        courants = {}
+    fusion = dict(courants)
+    fusion["ad_vis"] = False
+    return _hub_patch(f"/api/projects/{project_id}", jwt_token,
+                      {"modules_actifs": fusion})
 
 
 def create_project(jwt_token: str, body: dict) -> dict:

@@ -50,6 +50,14 @@ def register_vis_routes(get_conn, jwt_user):
             projets = hub_service.list_org_projects(user["_jwt"])
         except hub_service.HubServiceError as e:
             raise HTTPException(status_code=e.status_code or 502, detail=f"Ad HUB : {e.detail}")
+        # Projets RETIRÉS d'Ad VIS : on les masque ici, et seulement ici.
+        # Opt-OUT et non opt-in : par défaut un projet reste visible dans le
+        # module (comportement historique), il faut un retrait explicite pour
+        # qu'il disparaisse. L'inverse aurait vidé l'écran de tout le monde.
+        def _retire(p):
+            m = p.get("modules_actifs") or {}
+            return isinstance(m, dict) and m.get("ad_vis") is False
+
         # On ne renvoie que ce dont l'écran de sélection a besoin.
         return {
             "projects": [
@@ -60,25 +68,29 @@ def register_vis_routes(get_conn, jwt_user):
                     "statut": p.get("statut"),
                     "client_nom": p.get("client_nom"),
                 }
-                for p in projets
+                for p in projets if not _retire(p)
             ]
         }
 
-    # ── Proxy : suppression d'un projet HUB depuis la carte de sélection ──────
+    # ── Retrait d'un projet de la liste Ad VIS (PAS une suppression) ─────────
     @router.delete("/v2/ad-hub-projects/{project_id}", status_code=200)
-    def delete_ad_hub_project(project_id: int, user=Depends(jwt_user)):
-        """Supprime un projet (proxy DELETE HUB /api/projects/{id}).
+    def retirer_du_module(project_id: int, user=Depends(jwt_user)):
+        """Retire le projet de l'écran Ad VIS. Il reste intact ailleurs.
 
-        Ad VIS n'a pas de table projets : il n'y a donc rien à détacher côté
-        Ad VIS, la suppression porte sur la fiche Ad HUB elle-même. Le HUB
-        applique son soft-delete et vérifie les droits à partir du JWT
-        forwardé — aucune décision d'autorisation n'est prise ici.
+        Incident du 13 août 2026 : cette route appelait le soft-delete d'Ad HUB.
+        Nettoyer sa liste Ad VIS effaçait donc les projets de TOUS les modules.
+        Règle posée par Simon : supprimer dans un module ne retire QUE du
+        module. On bascule le drapeau `modules_actifs.ad_vis`, rien d'autre.
+
+        La route garde le verbe DELETE pour ne pas casser les clients
+        déployés ; c'est son EFFET qui change, et le corps de réponse le dit
+        (`retire_du_module` plutôt que `deleted`).
         """
         try:
-            hub_service.delete_project(user["_jwt"], project_id)
+            hub_service.retirer_projet_du_module(user["_jwt"], project_id)
         except hub_service.HubServiceError as e:
             raise HTTPException(status_code=e.status_code or 502, detail=f"Ad HUB : {e.detail}")
-        return {"deleted": True, "id": project_id}
+        return {"retire_du_module": True, "deleted": False, "id": project_id}
 
     # ── Aperçu du code projet (gabarit de l'org) — modale « + Nouveau projet » ──
     @router.get("/v2/codification-preview")
